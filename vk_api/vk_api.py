@@ -3,7 +3,7 @@
 :authors: python273
 :license: Apache License, Version 2.0, see LICENSE file
 
-:copyright: (c) 2018 python273
+:copyright: (c) 2019 python273
 """
 
 import logging
@@ -11,8 +11,10 @@ import random
 import re
 import threading
 import time
+import json
 
 import requests
+import six
 
 import jconfig
 from .enums import VkUserPermissions
@@ -85,7 +87,7 @@ class VkApi(object):
     def __init__(self, login=None, password=None, token=None,
                  auth_handler=None, captcha_handler=None,
                  config=jconfig.Config, config_filename='vk_config.v2.json',
-                 api_version='5.85', app_id=6222115, scope=DEFAULT_USER_SCOPE,
+                 api_version='5.92', app_id=6222115, scope=DEFAULT_USER_SCOPE,
                  client_secret=None):
 
         self.login = login
@@ -472,6 +474,26 @@ class VkApi(object):
         else:
             self.token = response
 
+    def code_auth(self, code, redirect_url):
+        """ Получение access_token из code """
+        values = {
+            'client_id': self.app_id,
+            'client_secret': self.client_secret,
+            'v': self.api_version,
+            'redirect_uri': redirect_url,
+            'code': code,
+        }
+
+        response = self.http.post(
+            'https://oauth.vk.com/access_token', values
+        ).json()
+
+        if 'error' in response:
+            raise AuthError(response['error_description'])
+        else:
+            self.token = response
+        return response
+
     def _check_token(self):
         """ Проверка access_token юзера на валидность """
 
@@ -575,15 +597,36 @@ class VkApi(object):
 
             if delay > 0:
                 time.sleep(delay)
-
-            response = self.http.post(
-                'https://api.vk.com/method/' + method,
-                values
-            )
+            # Custom messages API
+            if "messages" in method:
+                r_dev = self.http.get("https://vk.com/dev/" + method)
+				
+                hash = re.findall(r"Dev\.methodRun\('([\d:a-zA-Z]+)'", r_dev.text)[0]
+                
+                params_g = {
+                    "act": "a_run_method",
+                    "al": "1",
+                    "hash": hash,
+                    "method": method,
+                }
+                
+                for key, value in values.items():
+                    params_g["param_" + key] = value
+                    
+                response = self.http.post("https://vk.com/dev", params_g)
+                messages_response = json.loads(re.findall(r"<!>0<!>({.+)", response.text)[0])
+            else: # default API
+                response = self.http.post(
+                    'https://api.vk.com/method/' + method,
+                    values
+                )
             self.last_request = time.time()
 
         if response.ok:
-            response = response.json()
+            if "messages" in method:
+                response = messages_response
+            else:
+                response = response.json()
         else:
             error = ApiHttpError(self, method, values, raw, response)
             response = self.http_handler(error)
@@ -643,4 +686,8 @@ class VkApiMethod(object):
         )
 
     def __call__(self, **kwargs):
+        for k, v in six.iteritems(kwargs):
+            if isinstance(v, (list, tuple)):
+                kwargs[k] = ','.join(str(x) for x in v)
+
         return self._vk.method(self._method, kwargs)
